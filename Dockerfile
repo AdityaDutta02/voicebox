@@ -12,6 +12,7 @@ WORKDIR /build
 COPY package.json bun.lock ./
 COPY app/ ./app/
 COPY web/ ./web/
+COPY CHANGELOG.md ./
 
 # Strip workspaces not needed for web build, and fix trailing comma
 RUN sed -i '/"tauri"/d; /"landing"/d' package.json && \
