@@ -1,5 +1,5 @@
 # ============================================================
-# Voicebox — Local TTS Server with Web UI (CPU)
+# Voicebox — GPU TTS Server with Web UI (CUDA 12.1)
 # 3-stage build: Frontend → Python deps → Runtime
 # ============================================================
 
@@ -35,15 +35,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN pip install --no-cache-dir --upgrade pip
 
 COPY backend/requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+# Install CUDA-enabled PyTorch first so requirements.txt doesn't pull CPU-only torch
+RUN pip install --no-cache-dir --prefix=/install \
+    torch torchaudio --index-url https://download.pytorch.org/whl/cu121
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt \
+    --extra-index-url https://download.pytorch.org/whl/cu121
 RUN pip install --no-cache-dir --prefix=/install --no-deps chatterbox-tts
 RUN pip install --no-cache-dir --prefix=/install --no-deps hume-tada
 RUN pip install --no-cache-dir --prefix=/install \
     git+https://github.com/QwenLM/Qwen3-TTS.git
 
 
-# === Stage 3: Runtime ===
-FROM python:3.11-slim
+# === Stage 3: Runtime (CUDA 12.1 — GPU support) ===
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Create non-root user for security
 RUN groupadd -r voicebox && \
@@ -51,14 +57,23 @@ RUN groupadd -r voicebox && \
 
 WORKDIR /app
 
-# Install only runtime system dependencies
+# Install Python 3.11 and runtime system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3-pip \
     ffmpeg \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Make python3.11 the default python3
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+
 # Copy installed Python packages from builder stage
+# python:3.11-slim installs to /usr/local/lib/python3.11/site-packages
+# Ubuntu python3.11 also finds packages at /usr/local/lib/python3.11/dist-packages
+# Symlink ensures the copied packages are found
 COPY --from=backend-builder /install /usr/local
+RUN ln -sf /usr/local/lib/python3.11/site-packages \
+           /usr/local/lib/python3.11/dist-packages 2>/dev/null || true
 
 # Copy backend application code
 COPY --chown=voicebox:voicebox backend/ /app/backend/
@@ -81,4 +96,4 @@ HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=60s \
     CMD curl -f http://localhost:17493/health || exit 1
 
 # Start the FastAPI server
-CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "17493"]
+CMD ["python3", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "17493"]
