@@ -6,6 +6,27 @@ from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime
 
+from .models_channels import (
+    AudioChannelCreate,
+    AudioChannelUpdate,
+    AudioChannelResponse,
+    ChannelVoiceAssignment,
+    ProfileChannelAssignment,
+)
+from .models_bulk import (
+    BulkGenerationRequest,
+    BulkJobStatus,
+    BulkGenerationResponse,
+    BulkStatusResponse,
+)
+
+__all__ = [
+    "AudioChannelCreate", "AudioChannelUpdate", "AudioChannelResponse",
+    "ChannelVoiceAssignment", "ProfileChannelAssignment",
+    "BulkGenerationRequest", "BulkJobStatus", "BulkGenerationResponse",
+    "BulkStatusResponse",
+]
+
 
 class VoiceProfileCreate(BaseModel):
     """Request model for creating a voice profile."""
@@ -91,8 +112,8 @@ class GenerationRequest(BaseModel):
     )
 
 
-class GenerationResponse(BaseModel):
-    """Response model for voice generation."""
+class _GenerationBase(BaseModel):
+    """Shared fields for generation response models."""
 
     id: str
     profile_id: str
@@ -113,6 +134,16 @@ class GenerationResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class GenerationResponse(_GenerationBase):
+    """Response model for voice generation."""
+
+
+class HistoryResponse(_GenerationBase):
+    """Response model for history entry (includes profile name)."""
+
+    profile_name: str
 
 
 class HistoryQuery(BaseModel):
@@ -122,31 +153,6 @@ class HistoryQuery(BaseModel):
     search: Optional[str] = None
     limit: int = Field(default=50, ge=1, le=100)
     offset: int = Field(default=0, ge=0)
-
-
-class HistoryResponse(BaseModel):
-    """Response model for history entry (includes profile name)."""
-
-    id: str
-    profile_id: str
-    profile_name: str
-    text: str
-    language: str
-    audio_path: Optional[str] = None
-    duration: Optional[float] = None
-    seed: Optional[int] = None
-    instruct: Optional[str] = None
-    engine: Optional[str] = "qwen"
-    model_size: Optional[str] = None
-    status: str = "completed"
-    error: Optional[str] = None
-    is_favorited: bool = False
-    created_at: datetime
-    versions: Optional[List["GenerationVersionResponse"]] = None
-    active_version_id: Optional[str] = None
-
-    class Config:
-        from_attributes = True
 
 
 class HistoryListResponse(BaseModel):
@@ -259,45 +265,6 @@ class ActiveTasksResponse(BaseModel):
 
     downloads: List[ActiveDownloadTask]
     generations: List[ActiveGenerationTask]
-
-
-class AudioChannelCreate(BaseModel):
-    """Request model for creating an audio channel."""
-
-    name: str = Field(..., min_length=1, max_length=100)
-    device_ids: List[str] = Field(default_factory=list)
-
-
-class AudioChannelUpdate(BaseModel):
-    """Request model for updating an audio channel."""
-
-    name: Optional[str] = Field(None, min_length=1, max_length=100)
-    device_ids: Optional[List[str]] = None
-
-
-class AudioChannelResponse(BaseModel):
-    """Response model for audio channel."""
-
-    id: str
-    name: str
-    is_default: bool
-    device_ids: List[str]
-    created_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
-class ChannelVoiceAssignment(BaseModel):
-    """Request model for assigning voices to a channel."""
-
-    profile_ids: List[str]
-
-
-class ProfileChannelAssignment(BaseModel):
-    """Request model for assigning channels to a profile."""
-
-    channel_ids: List[str]
 
 
 class StoryCreate(BaseModel):
@@ -518,41 +485,3 @@ class AvailableEffectsResponse(BaseModel):
     """Response listing all available effect types."""
 
     effects: List[AvailableEffect]
-
-
-class BulkGenerationRequest(BaseModel):
-    """Request to generate audio for multiple texts in parallel."""
-
-    texts: List[str]
-    profile_id: str
-    language: str = "en"
-    engine: str = "chatterbox"
-    seed: Optional[int] = None
-
-
-class BulkJobStatus(BaseModel):
-    """Status of a single job within a bulk batch."""
-
-    job_id: str
-    index: int
-    text: str
-    status: str
-    audio_path: Optional[str] = None
-    error: Optional[str] = None
-
-
-class BulkGenerationResponse(BaseModel):
-    """Response from POST /generate/bulk."""
-
-    batch_id: str
-    jobs: List[BulkJobStatus]
-
-
-class BulkStatusResponse(BaseModel):
-    """Response from GET /generate/bulk/{batch_id}/status."""
-
-    batch_id: str
-    total: int
-    completed: int
-    failed: int
-    jobs: List[BulkJobStatus]
