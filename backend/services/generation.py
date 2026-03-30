@@ -22,6 +22,7 @@ import io
 import os
 import time
 import traceback
+from dataclasses import dataclass, field
 from typing import Literal, Optional
 
 from .. import config
@@ -32,6 +33,20 @@ from ..utils.tasks import get_task_manager
 # In-memory map: generation_id → RunPod job_id and submit time
 _runpod_jobs: dict[str, str] = {}
 _runpod_submit_times: dict[str, float] = {}
+
+
+@dataclass
+class _RunOpts:
+    """Options shared between local and RunPod generation paths."""
+
+    mode: Literal["generate", "retry", "regenerate"]
+    seed: Optional[int] = None
+    normalize: bool = False
+    effects_chain: Optional[list] = field(default=None)
+    instruct: Optional[str] = None
+    max_chunk_chars: Optional[int] = None
+    crossfade_ms: Optional[int] = None
+    version_id: Optional[str] = None
 
 
 def get_runpod_job_id(generation_id: str) -> str | None:
@@ -58,10 +73,21 @@ async def run_generation(
 ) -> None:
     """Execute TTS inference and persist the result.
 
-    Routes to RunPod when RUNPOD_GPU_ENDPOINT_ID is set and engine is chatterbox,
-    otherwise runs the local TTS pipeline.
+    Routes to RunPod when RUNPOD_GPU_ENDPOINT_ID is set and engine is qwen or
+    chatterbox, otherwise runs the local TTS pipeline.
     """
-    runpod_engines = ("chatterbox", "chatterbox_turbo")
+    opts = _RunOpts(
+        mode=mode,
+        seed=seed,
+        normalize=normalize,
+        effects_chain=effects_chain,
+        instruct=instruct,
+        max_chunk_chars=max_chunk_chars,
+        crossfade_ms=crossfade_ms,
+        version_id=version_id,
+    )
+
+    runpod_engines = ("qwen", "chatterbox", "chatterbox_turbo")
     if os.environ.get("RUNPOD_GPU_ENDPOINT_ID") and engine in runpod_engines:
         await _run_generation_runpod(
             generation_id=generation_id,
@@ -69,20 +95,13 @@ async def run_generation(
             text=text,
             language=language,
             engine=engine,
-            seed=seed,
-            normalize=normalize,
-            effects_chain=effects_chain,
-            instruct=instruct,
-            mode=mode,
-            max_chunk_chars=max_chunk_chars,
-            crossfade_ms=crossfade_ms,
-            version_id=version_id,
+            opts=opts,
         )
         return
 
     from ..backends import load_engine_model, get_tts_backend_for_engine, engine_needs_trim
     from ..utils.chunked_tts import generate_chunked
-    from ..utils.audio import normalize_audio, save_audio, trim_tts_output
+    from ..utils.audio import trim_tts_output
 
     task_manager = get_task_manager()
     bg_db = next(get_db())
@@ -117,47 +136,7 @@ async def run_generation(
             gen_kwargs["crossfade_ms"] = crossfade_ms
 
         audio, sample_rate = await generate_chunked(tts_model, text, voice_prompt, **gen_kwargs)
-
-        # --- Normalize (generate and regenerate always; retry skips) -----
-        if normalize or mode == "regenerate":
-            audio = normalize_audio(audio)
-
-        duration = len(audio) / sample_rate
-
-        # --- Persist audio and update status -----------------------------
-        if mode == "generate":
-            final_path = _save_generate(
-                generation_id=generation_id,
-                audio=audio,
-                sample_rate=sample_rate,
-                effects_chain=effects_chain,
-                save_audio=save_audio,
-                db=bg_db,
-            )
-        elif mode == "retry":
-            final_path = _save_retry(
-                generation_id=generation_id,
-                audio=audio,
-                sample_rate=sample_rate,
-                save_audio=save_audio,
-            )
-        elif mode == "regenerate":
-            final_path = _save_regenerate(
-                generation_id=generation_id,
-                version_id=version_id,
-                audio=audio,
-                sample_rate=sample_rate,
-                save_audio=save_audio,
-                db=bg_db,
-            )
-
-        await history.update_generation_status(
-            generation_id=generation_id,
-            status="completed",
-            db=bg_db,
-            audio_path=final_path,
-            duration=duration,
-        )
+        await _complete_audio(generation_id, audio, sample_rate, opts, bg_db)
 
     except Exception as e:
         traceback.print_exc()
@@ -172,20 +151,41 @@ async def run_generation(
         bg_db.close()
 
 
-def _save_generate(
-    *,
-    generation_id: str,
-    audio,
-    sample_rate: int,
-    effects_chain: Optional[list],
-    save_audio,
-    db,
-) -> str:
+async def _complete_audio(generation_id, audio, sample_rate, opts: _RunOpts, db) -> None:
+    """Normalize if needed, save, and mark generation completed."""
+    from ..utils.audio import normalize_audio
+
+    if opts.normalize or opts.mode == "regenerate":
+        audio = normalize_audio(audio)
+
+    duration = len(audio) / sample_rate
+    final_path = _dispatch_save(generation_id, audio, sample_rate, opts, db)
+
+    await history.update_generation_status(
+        generation_id=generation_id,
+        status="completed",
+        db=db,
+        audio_path=final_path,
+        duration=duration,
+    )
+
+
+def _dispatch_save(generation_id, audio, sample_rate, opts: _RunOpts, db) -> str:
+    """Call the right _save_* function based on opts.mode. Returns final path."""
+    if opts.mode == "generate":
+        return _save_generate(generation_id, audio, sample_rate, opts.effects_chain, db)
+    if opts.mode == "retry":
+        return _save_retry(generation_id, audio, sample_rate)
+    return _save_regenerate(generation_id, opts.version_id, audio, sample_rate, db)
+
+
+def _save_generate(generation_id, audio, sample_rate, effects_chain, db) -> str:
     """Save clean version and optionally an effects-processed version.
 
     Returns the final audio path (processed if effects were applied,
     otherwise clean).
     """
+    from ..utils.audio import save_audio
     from . import versions as versions_mod
 
     clean_audio_path = config.get_generations_dir() / f"{generation_id}.wav"
@@ -202,74 +202,61 @@ def _save_generate(
         is_default=not has_effects,
     )
 
-    final_audio_path = str(clean_audio_path)
+    if not has_effects:
+        return str(clean_audio_path)
 
-    if has_effects:
-        from ..utils.effects import apply_effects, validate_effects_chain
-
-        error_msg = validate_effects_chain(effects_chain)
-        if error_msg:
-            import logging
-            logging.getLogger(__name__).warning("invalid effects chain, skipping: %s", error_msg)
-            versions_mod.set_default_version(
-                versions_mod.list_versions(generation_id, db)[0].id, db
-            )
-        else:
-            processed_audio = apply_effects(audio, sample_rate, effects_chain)
-            processed_path = config.get_generations_dir() / f"{generation_id}_processed.wav"
-            save_audio(processed_audio, str(processed_path), sample_rate)
-            final_audio_path = str(processed_path)
-            versions_mod.create_version(
-                generation_id=generation_id,
-                label="version-2",
-                audio_path=str(processed_path),
-                db=db,
-                effects_chain=effects_chain,
-                is_default=True,
-            )
-
-    return final_audio_path
+    return _apply_effects_version(generation_id, audio, sample_rate, effects_chain, db)
 
 
-def _save_retry(
-    *,
-    generation_id: str,
-    audio,
-    sample_rate: int,
-    save_audio,
-) -> str:
-    """Save retry output -- single file, no versions.
+def _apply_effects_version(generation_id, audio, sample_rate, effects_chain, db) -> str:
+    """Apply effects chain and save as processed version. Returns final path."""
+    from ..utils.effects import apply_effects, validate_effects_chain
+    from ..utils.audio import save_audio
+    from . import versions as versions_mod
+    import logging
 
-    Returns the audio path.
-    """
+    clean_audio_path = str(config.get_generations_dir() / f"{generation_id}.wav")
+    error_msg = validate_effects_chain(effects_chain)
+    if error_msg:
+        logging.getLogger(__name__).warning("invalid effects chain, skipping: %s", error_msg)
+        versions_mod.set_default_version(
+            versions_mod.list_versions(generation_id, db)[0].id, db
+        )
+        return clean_audio_path
+
+    processed_audio = apply_effects(audio, sample_rate, effects_chain)
+    processed_path = config.get_generations_dir() / f"{generation_id}_processed.wav"
+    save_audio(processed_audio, str(processed_path), sample_rate)
+    versions_mod.create_version(
+        generation_id=generation_id,
+        label="version-2",
+        audio_path=str(processed_path),
+        db=db,
+        effects_chain=effects_chain,
+        is_default=True,
+    )
+    return str(processed_path)
+
+
+def _save_retry(generation_id, audio, sample_rate) -> str:
+    """Save retry output -- single file, no versions. Returns the audio path."""
+    from ..utils.audio import save_audio
+
     audio_path = config.get_generations_dir() / f"{generation_id}.wav"
     save_audio(audio, str(audio_path), sample_rate)
     return str(audio_path)
 
 
-def _save_regenerate(
-    *,
-    generation_id: str,
-    version_id: Optional[str],
-    audio,
-    sample_rate: int,
-    save_audio,
-    db,
-) -> str:
-    """Save regeneration output as a new version with auto-label.
-
-    Returns the audio path.
-    """
+def _save_regenerate(generation_id, version_id, audio, sample_rate, db) -> str:
+    """Save regeneration output as a new version with auto-label. Returns path."""
+    from ..utils.audio import save_audio
     from . import versions as versions_mod
-
     import uuid as _uuid
+    from ..database import GenerationVersion as DBGenerationVersion
 
     suffix = _uuid.uuid4().hex[:8]
     audio_path = config.get_generations_dir() / f"{generation_id}_{suffix}.wav"
     save_audio(audio, str(audio_path), sample_rate)
-
-    # Count via DB query rather than list length to avoid TOCTOU race
-    from ..database import GenerationVersion as DBGenerationVersion
 
     count = db.query(DBGenerationVersion).filter_by(generation_id=generation_id).count()
     label = f"take-{count + 1}"
@@ -282,7 +269,6 @@ def _save_regenerate(
         effects_chain=None,
         is_default=True,
     )
-
     return str(audio_path)
 
 
@@ -293,20 +279,12 @@ async def _run_generation_runpod(
     text: str,
     language: str,
     engine: str,
-    seed: Optional[int],
-    normalize: bool = False,
-    effects_chain: Optional[list] = None,
-    instruct: Optional[str] = None,
-    mode: Literal["generate", "retry", "regenerate"],
-    max_chunk_chars: Optional[int] = None,
-    crossfade_ms: Optional[int] = None,
-    version_id: Optional[str] = None,
+    opts: _RunOpts,
 ) -> None:
     """Dispatch TTS generation to RunPod GPU worker and poll until complete."""
     import numpy as np
     import soundfile as sf
 
-    from ..utils.audio import save_audio
     from .runpod_client import submit_job, get_status
     from ..database import ProfileSample as DBProfileSample
 
@@ -328,10 +306,10 @@ async def _run_generation_runpod(
             "reference_text": sample.reference_text,
             "language": language,
             "profile_id": profile_id,
-            "seed": seed if mode != "regenerate" else None,
+            "seed": opts.seed if opts.mode != "regenerate" else None,
         }
-        if instruct:
-            input_data["instruct"] = instruct
+        if opts.instruct:
+            input_data["instruct"] = opts.instruct
 
         job_id = await submit_job(input_data)
         _runpod_jobs[generation_id] = job_id
@@ -354,52 +332,10 @@ async def _run_generation_runpod(
 
             elif rp_status == "COMPLETED":
                 output = status_data.get("output", {})
-                audio_b64 = output["audio_b64"]
-
-                audio_bytes = base64.b64decode(audio_b64)
-                audio_buf = io.BytesIO(audio_bytes)
-                audio_array, sr = sf.read(audio_buf, dtype="float32")
+                audio_bytes = base64.b64decode(output["audio_b64"])
+                audio_array, sr = sf.read(io.BytesIO(audio_bytes), dtype="float32")
                 audio_array = np.asarray(audio_array, dtype=np.float32)
-
-                if normalize:
-                    from ..utils.audio import normalize_audio
-                    audio_array = normalize_audio(audio_array)
-
-                duration = len(audio_array) / sr
-
-                if mode == "generate":
-                    final_path = _save_generate(
-                        generation_id=generation_id,
-                        audio=audio_array,
-                        sample_rate=sr,
-                        effects_chain=effects_chain,
-                        save_audio=save_audio,
-                        db=bg_db,
-                    )
-                elif mode == "retry":
-                    final_path = _save_retry(
-                        generation_id=generation_id,
-                        audio=audio_array,
-                        sample_rate=sr,
-                        save_audio=save_audio,
-                    )
-                else:
-                    final_path = _save_regenerate(
-                        generation_id=generation_id,
-                        version_id=version_id,
-                        audio=audio_array,
-                        sample_rate=sr,
-                        save_audio=save_audio,
-                        db=bg_db,
-                    )
-
-                await history.update_generation_status(
-                    generation_id=generation_id,
-                    status="completed",
-                    db=bg_db,
-                    audio_path=final_path,
-                    duration=duration,
-                )
+                await _complete_audio(generation_id, audio_array, sr, opts, bg_db)
                 break
 
             elif rp_status in ("FAILED", "CANCELLED", "TIMED_OUT"):

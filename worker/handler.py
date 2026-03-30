@@ -7,14 +7,14 @@ import logging
 
 import runpod
 
-from chatterbox_runner import ChatterboxRunner
+from qwen3_runner import Qwen3Runner
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-logger.info("Initializing Chatterbox model...")
-runner = ChatterboxRunner()
-logger.info("Chatterbox model ready.")
+logger.info("Initializing Qwen3-TTS model...")
+runner = Qwen3Runner()
+logger.info("Qwen3-TTS model ready.")
 
 
 def handler(job: dict) -> dict:

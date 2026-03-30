@@ -1,5 +1,5 @@
 runpod
-chatterbox-tts
+qwen-tts
 soundfile
 numpy
 torch

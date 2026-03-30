@@ -15,10 +15,10 @@ COPY worker/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY worker/handler.py .
-COPY worker/chatterbox_runner.py .
+COPY worker/qwen3_runner.py .
 
 # HuggingFace cache path — RunPod Flashboot snapshots this layer after first run.
-# First cold start downloads Chatterbox (~2GB). All subsequent cold starts restore
+# First cold start downloads Qwen3-TTS (~3.5GB). All subsequent cold starts restore
 # from the Flashboot snapshot — no re-download, no Network Volume needed.
 ENV HF_HOME=/root/.cache/huggingface
 
