@@ -1,0 +1,52 @@
+# ============================================================
+# Voicebox CPU Server — 2-stage build
+# Stage 1: Build frontend
+# Stage 2: Runtime (Python + FastAPI, no GPU/TTS)
+# ============================================================
+
+# === Stage 1: Build frontend ===
+FROM oven/bun:1 AS frontend
+
+WORKDIR /build
+COPY package.json bun.lock ./
+COPY app/ ./app/
+COPY web/ ./web/
+RUN echo "# Changelog" > /build/CHANGELOG.md
+
+# Strip workspace entries not needed for web build
+RUN sed -i '/"tauri"/d; /"landing"/d' package.json && \
+    sed -i -z 's/,\n  ]/\n  ]/' package.json
+RUN bun install --no-save
+RUN cd web && bunx --bun vite build
+
+# === Stage 2: Runtime ===
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y \
+    ffmpeg \
+    libsndfile1 \
+    libsox-fmt-all \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install CPU-only Python dependencies
+COPY requirements-cpu.txt .
+RUN pip install --no-cache-dir -r requirements-cpu.txt
+
+# Copy backend source
+COPY backend ./backend
+
+# Copy built web assets from stage 1
+COPY --from=frontend /build/web/dist ./web/dist
+
+# Serverless mode: all TTS dispatched to RunPod GPU endpoint.
+# Required env vars at runtime:
+#   RUNPOD_API_KEY, RUNPOD_GPU_ENDPOINT_ID
+#   TURSO_DATABASE_URL, TURSO_AUTH_TOKEN
+#   VOICEBOX_CORS_ORIGINS
+ENV VOICEBOX_RUNPOD_MODE=1
+
+EXPOSE 17493
+CMD ["python", "-m", "uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "17493"]

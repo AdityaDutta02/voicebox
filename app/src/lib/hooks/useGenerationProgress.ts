@@ -8,7 +8,8 @@ import { useServerStore } from '@/stores/serverStore';
 
 interface GenerationStatusEvent {
   id: string;
-  status: 'loading_model' | 'generating' | 'completed' | 'failed' | 'not_found';
+  status: 'queued' | 'warming' | 'loading_model' | 'generating' | 'completed' | 'failed' | 'not_found';
+  worker_status?: string;
   duration?: number;
   error?: string;
 }
@@ -24,6 +25,7 @@ export function useGenerationProgress() {
   const pendingIds = useGenerationStore((s) => s.pendingGenerationIds);
   const removePendingGeneration = useGenerationStore((s) => s.removePendingGeneration);
   const removePendingStoryAdd = useGenerationStore((s) => s.removePendingStoryAdd);
+  const setWarming = useGenerationStore((s) => s.setWarming);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const setAudioWithAutoPlay = usePlayerStore((s) => s.setAudioWithAutoPlay);
   const autoplayOnGenerate = useServerStore((s) => s.autoplayOnGenerate);
@@ -70,7 +72,12 @@ export function useGenerationProgress() {
         try {
           const data: GenerationStatusEvent = JSON.parse(event.data);
 
-          if (data.status === 'completed') {
+          if (data.status === 'warming' || data.status === 'queued') {
+            setWarming(true);
+          } else if (data.status === 'generating' || data.status === 'loading_model') {
+            setWarming(false);
+          } else if (data.status === 'completed') {
+            setWarming(false);
             source.close();
             currentSources.delete(id);
             removePendingGeneration(id);
@@ -115,6 +122,7 @@ export function useGenerationProgress() {
               setAudioWithAutoPlay(genAudioUrl, id, '', '');
             }
           } else if (data.status === 'failed' || data.status === 'not_found') {
+            setWarming(false);
             source.close();
             currentSources.delete(id);
             removePendingGeneration(id);
@@ -148,6 +156,7 @@ export function useGenerationProgress() {
     pendingIds,
     removePendingGeneration,
     removePendingStoryAdd,
+    setWarming,
     queryClient,
     toast,
     setAudioWithAutoPlay,

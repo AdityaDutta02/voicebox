@@ -1,0 +1,33 @@
+# CPU serverless endpoint dependencies.
+# TTS inference runs on the GPU worker — this image only needs FastAPI,
+# DB access, HTTP client (to dispatch to RunPod), and audio utilities.
+
+# FastAPI and server
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.0
+
+# Database
+sqlalchemy>=2.0.0
+alembic>=1.13.0
+libsql-experimental
+
+# HTTP client (RunPod dispatch + CUDA binary check)
+httpx>=0.27.0
+
+# Audio processing (used by routes even in dispatch mode)
+librosa>=0.10.0
+soundfile>=0.12.0
+numpy>=1.24.0
+numba>=0.60.0,<0.61.0
+pedalboard>=0.9.0
+
+# PyTorch CPU-only (needed for imports; no GPU work happens here)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.7.0
+
+# Other runtime imports
+huggingface_hub>=0.20.0
+Pillow>=10.0.0
+python-multipart>=0.0.6
+pyloudnorm

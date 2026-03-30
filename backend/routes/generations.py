@@ -19,6 +19,9 @@ from ..utils.tasks import get_task_manager
 
 router = APIRouter()
 
+# In-memory batch tracking: batch_id → ordered list of generation_ids
+_batches: dict[str, list[str]] = {}
+
 
 @router.post("/generate", response_model=models.GenerationResponse)
 async def generate_speech(
@@ -192,9 +195,11 @@ async def get_generation_status(generation_id: str, db: Session = Depends(get_db
                     yield f"data: {json.dumps({'status': 'not_found', 'id': generation_id})}\n\n"
                     return
 
+                status = gen.status or "completed"
                 payload = {
                     "id": gen.id,
-                    "status": gen.status or "completed",
+                    "status": status,
+                    "worker_status": status,
                     "duration": gen.duration,
                     "error": gen.error,
                 }
@@ -306,4 +311,106 @@ async def stream_speech(
         _wav_stream(),
         media_type="audio/wav",
         headers={"Content-Disposition": 'attachment; filename="speech.wav"'},
+    )
+
+
+@router.post("/generate/bulk", response_model=models.BulkGenerationResponse)
+async def bulk_generate(
+    data: models.BulkGenerationRequest,
+    db: Session = Depends(get_db),
+):
+    """Submit multiple TTS jobs in parallel. Returns batch_id and per-job IDs."""
+    if not data.texts:
+        raise HTTPException(status_code=400, detail="texts cannot be empty")
+
+    batch_id = str(uuid.uuid4())
+    task_manager = get_task_manager()
+    jobs = []
+
+    for i, text in enumerate(data.texts):
+        generation_id = str(uuid.uuid4())
+
+        profile = await profiles.get_profile(data.profile_id, db)
+        if not profile:
+            raise HTTPException(status_code=404, detail=f"Profile not found: {data.profile_id}")
+
+        await history.create_generation(
+            profile_id=data.profile_id,
+            text=text,
+            language=data.language,
+            audio_path="",
+            duration=0,
+            seed=data.seed,
+            db=db,
+            instruct=None,
+            generation_id=generation_id,
+            status="queued",
+            engine=data.engine,
+            model_size=None,
+        )
+
+        task_manager.start_generation(
+            task_id=generation_id,
+            profile_id=data.profile_id,
+            text=text,
+        )
+
+        enqueue_generation(
+            run_generation(
+                generation_id=generation_id,
+                profile_id=data.profile_id,
+                text=text,
+                language=data.language,
+                engine=data.engine,
+                model_size=None,
+                seed=data.seed,
+                mode="generate",
+            )
+        )
+
+        jobs.append(models.BulkJobStatus(
+            job_id=generation_id,
+            index=i,
+            text=text,
+            status="queued",
+        ))
+
+    _batches[batch_id] = [j.job_id for j in jobs]
+    return models.BulkGenerationResponse(batch_id=batch_id, jobs=jobs)
+
+
+@router.get("/generate/bulk/{batch_id}/status", response_model=models.BulkStatusResponse)
+async def bulk_status(batch_id: str, db: Session = Depends(get_db)):
+    """Poll the status of all jobs in a bulk batch."""
+    generation_ids = _batches.get(batch_id)
+    if not generation_ids:
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    jobs = []
+    completed = 0
+    failed = 0
+
+    for i, gen_id in enumerate(generation_ids):
+        gen = db.query(DBGeneration).filter_by(id=gen_id).first()
+        if gen:
+            status = gen.status or "completed"
+            if status == "completed":
+                completed += 1
+            elif status == "failed":
+                failed += 1
+            jobs.append(models.BulkJobStatus(
+                job_id=gen_id,
+                index=i,
+                text=gen.text,
+                status=status,
+                audio_path=gen.audio_path,
+                error=gen.error,
+            ))
+
+    return models.BulkStatusResponse(
+        batch_id=batch_id,
+        total=len(generation_ids),
+        completed=completed,
+        failed=failed,
+        jobs=jobs,
     )

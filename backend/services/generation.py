@@ -16,6 +16,11 @@ Mode differences:
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import io
+import os
+import time
 import traceback
 from typing import Literal, Optional
 
@@ -23,6 +28,15 @@ from .. import config
 from . import history, profiles
 from ..database import get_db
 from ..utils.tasks import get_task_manager
+
+# In-memory map: generation_id → RunPod job_id and submit time
+_runpod_jobs: dict[str, str] = {}
+_runpod_submit_times: dict[str, float] = {}
+
+
+def get_runpod_job_id(generation_id: str) -> str | None:
+    """Return the RunPod job_id for a generation, or None if not dispatched."""
+    return _runpod_jobs.get(generation_id)
 
 
 async def run_generation(
@@ -44,9 +58,28 @@ async def run_generation(
 ) -> None:
     """Execute TTS inference and persist the result.
 
-    This is the single entry point for all background generation work.
-    It is designed to be enqueued via ``services.task_queue.enqueue_generation``.
+    Routes to RunPod when RUNPOD_GPU_ENDPOINT_ID is set and engine is chatterbox,
+    otherwise runs the local TTS pipeline.
     """
+    runpod_engines = ("chatterbox", "chatterbox_turbo")
+    if os.environ.get("RUNPOD_GPU_ENDPOINT_ID") and engine in runpod_engines:
+        await _run_generation_runpod(
+            generation_id=generation_id,
+            profile_id=profile_id,
+            text=text,
+            language=language,
+            engine=engine,
+            seed=seed,
+            normalize=normalize,
+            effects_chain=effects_chain,
+            instruct=instruct,
+            mode=mode,
+            max_chunk_chars=max_chunk_chars,
+            crossfade_ms=crossfade_ms,
+            version_id=version_id,
+        )
+        return
+
     from ..backends import load_engine_model, get_tts_backend_for_engine, engine_needs_trim
     from ..utils.chunked_tts import generate_chunked
     from ..utils.audio import normalize_audio, save_audio, trim_tts_output
@@ -251,3 +284,144 @@ def _save_regenerate(
     )
 
     return str(audio_path)
+
+
+async def _run_generation_runpod(
+    *,
+    generation_id: str,
+    profile_id: str,
+    text: str,
+    language: str,
+    engine: str,
+    seed: Optional[int],
+    normalize: bool = False,
+    effects_chain: Optional[list] = None,
+    instruct: Optional[str] = None,
+    mode: Literal["generate", "retry", "regenerate"],
+    max_chunk_chars: Optional[int] = None,
+    crossfade_ms: Optional[int] = None,
+    version_id: Optional[str] = None,
+) -> None:
+    """Dispatch TTS generation to RunPod GPU worker and poll until complete."""
+    import numpy as np
+    import soundfile as sf
+
+    from ..utils.audio import save_audio
+    from .runpod_client import submit_job, get_status
+    from ..database import ProfileSample as DBProfileSample
+
+    task_manager = get_task_manager()
+    bg_db = next(get_db())
+
+    try:
+        samples = bg_db.query(DBProfileSample).filter_by(profile_id=profile_id).all()
+        if not samples:
+            raise ValueError(f"No audio samples for profile {profile_id}")
+
+        sample = samples[0]
+        with open(sample.audio_path, "rb") as f:
+            ref_audio_b64 = base64.b64encode(f.read()).decode()
+
+        input_data: dict = {
+            "text": text,
+            "reference_audio_b64": ref_audio_b64,
+            "reference_text": sample.reference_text,
+            "language": language,
+            "profile_id": profile_id,
+            "seed": seed if mode != "regenerate" else None,
+        }
+        if instruct:
+            input_data["instruct"] = instruct
+
+        job_id = await submit_job(input_data)
+        _runpod_jobs[generation_id] = job_id
+        _runpod_submit_times[generation_id] = time.time()
+
+        await history.update_generation_status(generation_id, "queued", bg_db)
+
+        while True:
+            await asyncio.sleep(2)
+            status_data = await get_status(job_id)
+            rp_status = status_data.get("status", "IN_QUEUE")
+
+            if rp_status == "IN_QUEUE":
+                elapsed = time.time() - _runpod_submit_times[generation_id]
+                db_status = "warming" if elapsed > 5 else "queued"
+                await history.update_generation_status(generation_id, db_status, bg_db)
+
+            elif rp_status == "IN_PROGRESS":
+                await history.update_generation_status(generation_id, "generating", bg_db)
+
+            elif rp_status == "COMPLETED":
+                output = status_data.get("output", {})
+                audio_b64 = output["audio_b64"]
+
+                audio_bytes = base64.b64decode(audio_b64)
+                audio_buf = io.BytesIO(audio_bytes)
+                audio_array, sr = sf.read(audio_buf, dtype="float32")
+                audio_array = np.asarray(audio_array, dtype=np.float32)
+
+                if normalize:
+                    from ..utils.audio import normalize_audio
+                    audio_array = normalize_audio(audio_array)
+
+                duration = len(audio_array) / sr
+
+                if mode == "generate":
+                    final_path = _save_generate(
+                        generation_id=generation_id,
+                        audio=audio_array,
+                        sample_rate=sr,
+                        effects_chain=effects_chain,
+                        save_audio=save_audio,
+                        db=bg_db,
+                    )
+                elif mode == "retry":
+                    final_path = _save_retry(
+                        generation_id=generation_id,
+                        audio=audio_array,
+                        sample_rate=sr,
+                        save_audio=save_audio,
+                    )
+                else:
+                    final_path = _save_regenerate(
+                        generation_id=generation_id,
+                        version_id=version_id,
+                        audio=audio_array,
+                        sample_rate=sr,
+                        save_audio=save_audio,
+                        db=bg_db,
+                    )
+
+                await history.update_generation_status(
+                    generation_id=generation_id,
+                    status="completed",
+                    db=bg_db,
+                    audio_path=final_path,
+                    duration=duration,
+                )
+                break
+
+            elif rp_status in ("FAILED", "CANCELLED", "TIMED_OUT"):
+                error_msg = status_data.get("error") or f"RunPod job {rp_status}"
+                await history.update_generation_status(
+                    generation_id=generation_id,
+                    status="failed",
+                    db=bg_db,
+                    error=error_msg,
+                )
+                break
+
+    except Exception as exc:
+        traceback.print_exc()
+        await history.update_generation_status(
+            generation_id=generation_id,
+            status="failed",
+            db=bg_db,
+            error=str(exc),
+        )
+    finally:
+        _runpod_jobs.pop(generation_id, None)
+        _runpod_submit_times.pop(generation_id, None)
+        task_manager.complete_generation(generation_id)
+        bg_db.close()

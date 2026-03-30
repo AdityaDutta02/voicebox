@@ -1,0 +1,5 @@
+runpod
+chatterbox-tts
+soundfile
+numpy
+torch

@@ -5,10 +5,13 @@ interface GenerationState {
   pendingGenerationIds: Set<string>;
   /** Whether any generation is in progress (derived from pendingGenerationIds) */
   isGenerating: boolean;
+  /** True when any pending generation is waiting for a cold GPU worker */
+  isWarming: boolean;
   /** Map of generationId → storyId for deferred story additions */
   pendingStoryAdds: Map<string, string>;
   addPendingGeneration: (id: string) => void;
   removePendingGeneration: (id: string) => void;
+  setWarming: (warming: boolean) => void;
   addPendingStoryAdd: (generationId: string, storyId: string) => void;
   removePendingStoryAdd: (generationId: string) => string | undefined;
   setActiveGenerationId: (id: string | null) => void;
@@ -18,6 +21,7 @@ interface GenerationState {
 export const useGenerationStore = create<GenerationState>((set, get) => ({
   pendingGenerationIds: new Set(),
   isGenerating: false,
+  isWarming: false,
   activeGenerationId: null,
   pendingStoryAdds: new Map(),
 
@@ -34,6 +38,8 @@ export const useGenerationStore = create<GenerationState>((set, get) => ({
       next.delete(id);
       return { pendingGenerationIds: next, isGenerating: next.size > 0 };
     }),
+
+  setWarming: (warming) => set({ isWarming: warming }),
 
   addPendingStoryAdd: (generationId, storyId) =>
     set((state) => {

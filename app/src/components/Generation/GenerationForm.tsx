@@ -22,13 +22,16 @@ import { Textarea } from '@/components/ui/textarea';
 import { getLanguageOptionsForEngine } from '@/lib/constants/languages';
 import { useGenerationForm } from '@/lib/hooks/useGenerationForm';
 import { useProfile } from '@/lib/hooks/useProfiles';
+import { useGenerationStore } from '@/stores/generationStore';
 import { useUIStore } from '@/stores/uiStore';
 import { EngineModelSelector, getEngineDescription } from './EngineModelSelector';
 import { ParalinguisticInput } from './ParalinguisticInput';
+import { WarmUpBanner } from './WarmUpBanner';
 
 export function GenerationForm() {
   const selectedProfileId = useUIStore((state) => state.selectedProfileId);
   const { data: selectedProfile } = useProfile(selectedProfileId || '');
+  const isWarming = useGenerationStore((s) => s.isWarming);
 
   const { form, handleSubmit, isPending } = useGenerationForm();
 
@@ -174,6 +177,8 @@ export function GenerationForm() {
                 )}
               />
             </div>
+
+            <WarmUpBanner visible={isWarming} />
 
             <Button type="submit" className="w-full" disabled={isPending || !selectedProfileId}>
               {isPending ? (

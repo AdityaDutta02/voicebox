@@ -1,6 +1,7 @@
 """Engine creation, initialization, and session management."""
 
 import logging
+import os
 import uuid
 
 from sqlalchemy import create_engine
@@ -31,13 +32,21 @@ def init_db() -> None:
     """Initialize the database engine, run migrations, create tables, and seed data."""
     global engine, SessionLocal, _db_path
 
-    _db_path = config.get_db_path()
-    _db_path.parent.mkdir(parents=True, exist_ok=True)
+    turso_url = os.environ.get("TURSO_DATABASE_URL")
 
-    engine = create_engine(
-        f"sqlite:///{_db_path}",
-        connect_args={"check_same_thread": False},
-    )
+    if turso_url:
+        logger.info("Using Turso DB: %s", turso_url)
+        engine = create_engine(
+            turso_url,
+            connect_args={"check_same_thread": False},
+        )
+    else:
+        _db_path = config.get_db_path()
+        _db_path.parent.mkdir(parents=True, exist_ok=True)
+        engine = create_engine(
+            f"sqlite:///{_db_path}",
+            connect_args={"check_same_thread": False},
+        )
 
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

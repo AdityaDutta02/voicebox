@@ -4,6 +4,7 @@ to avoid GPU contention.
 """
 
 import asyncio
+import os
 import traceback
 
 # Keep references to fire-and-forget background tasks to prevent GC
@@ -34,8 +35,16 @@ async def _generation_worker():
 
 
 def enqueue_generation(coro):
-    """Add a generation coroutine to the serial queue."""
-    _generation_queue.put_nowait(coro)
+    """Add a generation coroutine to the queue.
+
+    In RunPod mode (RUNPOD_GPU_ENDPOINT_ID set), runs concurrently since each
+    job goes to an independent GPU worker with no local GPU contention.
+    In local mode, serializes through the queue to avoid GPU contention.
+    """
+    if os.environ.get("RUNPOD_GPU_ENDPOINT_ID"):
+        create_background_task(coro)
+    else:
+        _generation_queue.put_nowait(coro)
 
 
 def init_queue():
