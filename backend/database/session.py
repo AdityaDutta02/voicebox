@@ -40,7 +40,7 @@ def init_db() -> None:
             auth_token = os.environ.get("TURSO_AUTH_TOKEN", "")
             logger.info("Using Turso DB: %s", turso_url)
             # libsql-experimental uses its own connection, not a SQLAlchemy URL
-            _libsql_conn = libsql.connect("", sync_url=turso_url, auth_token=auth_token)
+            _libsql_conn = libsql.connect("/app/data/voicebox_sync.db", sync_url=turso_url, auth_token=auth_token)
             _libsql_conn.sync()
             engine = create_engine("sqlite://", creator=lambda: _libsql_conn)
         except Exception:
