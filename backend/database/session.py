@@ -30,6 +30,14 @@ _db_path = None
 
 def _create_turso_engine(turso_url: str):
     """Connect to Turso via libsql-experimental. Returns SQLAlchemy engine or None on failure."""
+    if not turso_url.startswith(("libsql://", "https://")):
+        logger.error(
+            "TURSO_DATABASE_URL looks invalid (got %r…). "
+            "Expected libsql://... — check env vars are not swapped. "
+            "Falling back to local SQLite.",
+            turso_url[:20],
+        )
+        return None
     try:
         import libsql_experimental as libsql  # noqa: PLC0415
         auth_token = os.environ.get("TURSO_AUTH_TOKEN", "")
@@ -39,7 +47,9 @@ def _create_turso_engine(turso_url: str):
         conn = libsql.connect(str(sync_db_path), sync_url=turso_url, auth_token=auth_token)
         conn.sync()
         return create_engine("sqlite://", creator=lambda: conn)
-    except Exception:
+    except BaseException:
+        # libsql-experimental raises pyo3_runtime.PanicException (a BaseException, not Exception)
+        # on invalid URLs or Rust-level failures — must catch BaseException to handle it.
         logger.exception("Turso connection failed — falling back to local SQLite")
         return None
 
