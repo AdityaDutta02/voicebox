@@ -35,9 +35,16 @@ def init_db() -> None:
     turso_url = os.environ.get("TURSO_DATABASE_URL")
 
     if turso_url:
+        auth_token = os.environ.get("TURSO_AUTH_TOKEN", "")
+        # libsql-experimental expects authToken in the URL query string
+        connector = turso_url.rstrip("/")
+        if "?" not in connector:
+            connector += f"?authToken={auth_token}"
+        else:
+            connector += f"&authToken={auth_token}"
         logger.info("Using Turso DB: %s", turso_url)
         engine = create_engine(
-            turso_url,
+            connector,
             connect_args={"check_same_thread": False},
         )
     else:
