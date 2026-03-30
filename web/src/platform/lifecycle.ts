@@ -4,9 +4,12 @@ class WebLifecycle implements PlatformLifecycle {
   onServerReady?: () => void;
 
   async startServer(_remote = false, _modelsDir?: string | null): Promise<string> {
-    // Web assumes server is running externally
-    // Return a default URL - this should be configured via env vars
-    const serverUrl = import.meta.env.VITE_SERVER_URL || 'http://localhost:17493';
+    // When served from the backend (Koyeb/Docker), use the same origin so the
+    // URL works regardless of deployment domain. Fall back to VITE_SERVER_URL
+    // (build-time override) or localhost for local dev.
+    const serverUrl =
+      import.meta.env.VITE_SERVER_URL ||
+      (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:17493');
     this.onServerReady?.();
     return serverUrl;
   }
@@ -17,7 +20,10 @@ class WebLifecycle implements PlatformLifecycle {
 
   async restartServer(_modelsDir?: string | null): Promise<string> {
     // No-op for web - server is managed externally
-    return import.meta.env.VITE_SERVER_URL || 'http://localhost:17493';
+    return (
+      import.meta.env.VITE_SERVER_URL ||
+      (typeof window !== 'undefined' ? window.location.origin : 'http://localhost:17493')
+    );
   }
 
   async setKeepServerRunning(_keep: boolean): Promise<void> {
