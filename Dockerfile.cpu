@@ -39,7 +39,7 @@ RUN pip install --no-cache-dir -r requirements-cpu.txt
 COPY backend ./backend
 
 # Copy built web assets from stage 1
-COPY --from=frontend /build/web/dist ./web/dist
+COPY --from=frontend /build/web/dist ./frontend
 
 # Serverless mode: all TTS dispatched to RunPod GPU endpoint.
 # Required env vars at runtime:
