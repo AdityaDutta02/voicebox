@@ -46,10 +46,11 @@ def _create_turso_engine(turso_url: str):
         sync_db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = libsql.connect(str(sync_db_path), sync_url=turso_url, auth_token=auth_token)
         conn.sync()
-        return create_engine("sqlite://", creator=lambda: conn)
+        # _LibsqlConnectionProxy is defined below; Python resolves at call time.
+        return create_engine("sqlite://", creator=lambda: _LibsqlConnectionProxy(conn))
     except BaseException:
         # libsql-experimental raises pyo3_runtime.PanicException (a BaseException, not Exception)
-        # on invalid URLs or Rust-level failures — must catch BaseException to handle it.
+        # on Rust-level failures — must use BaseException to catch it.
         logger.exception("Turso connection failed — falling back to local SQLite")
         return None
 
@@ -99,3 +100,24 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+class _LibsqlConnectionProxy:
+    """Proxy making libsql-experimental connections compatible with SQLAlchemy's pysqlite dialect.
+
+    SQLAlchemy's pysqlite dialect calls create_function() on every new connection
+    to register a REGEXP helper — this is a sqlite3-specific extension absent from
+    libsql's Connection object. The proxy intercepts that call with a no-op and
+    delegates all other attribute access to the underlying libsql connection.
+    """
+
+    __slots__ = ("_conn",)
+
+    def __init__(self, conn) -> None:
+        self._conn = conn
+
+    def create_function(self, *args, **kwargs) -> None:  # noqa: ANN002
+        pass  # pysqlite registers REGEXP here; libsql handles regex natively
+
+    def __getattr__(self, name: str):
+        return getattr(self._conn, name)
